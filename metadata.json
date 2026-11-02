@@ -1,0 +1,6 @@
+{
+  "name": "Mobile Vibe Coding Masterclass",
+  "description": "Learn how to use AI Vibe Coding to create real websites, web applications, and digital products directly from your Android or iPhone without prior coding experience.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
