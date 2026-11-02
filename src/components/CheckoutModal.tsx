@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { X, Lock, ShieldCheck, ArrowRight, AlertCircle, MessageCircle, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { X, Lock, ShieldCheck, ArrowRight, AlertCircle, MessageCircle, RefreshCw } from 'lucide-react';
 import { CheckoutFormData, VerificationResult } from '../types';
+import { safeFetchJson } from '../lib/apiClient';
 
 declare global {
   interface Window {
@@ -28,7 +29,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
     phone: '',
   });
 
-  const [step, setStep] = useState<'form' | 'processing' | 'verifying' | 'failed' | 'sandbox_confirm'>('form');
+  const [step, setStep] = useState<'form' | 'processing' | 'verifying' | 'failed'>('form');
   const [errorMessage, setErrorMessage] = useState('');
   const [activeReference, setActiveReference] = useState('');
   const [paystackConfig, setPaystackConfig] = useState<{ hasSecretKey: boolean; publicKey: string }>({
@@ -36,12 +37,22 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
     publicKey: '',
   });
 
-  // Fetch backend paystack config
+  // Fetch backend paystack config safely
   useEffect(() => {
     if (isOpen) {
-      fetch('/api/paystack/config')
-        .then((res) => res.json())
-        .then((data) => setPaystackConfig(data))
+      safeFetchJson<{ hasSecretKey: boolean; publicKey: string }>('/api/payments/config')
+        .then((res) => {
+          if (res.ok && res.data) {
+            setPaystackConfig(res.data);
+          } else {
+            // Fallback check to /api/paystack/config
+            safeFetchJson<{ hasSecretKey: boolean; publicKey: string }>('/api/paystack/config')
+              .then((fb) => {
+                if (fb.ok && fb.data) setPaystackConfig(fb.data);
+              })
+              .catch(() => {});
+          }
+        })
         .catch(() => {});
     }
   }, [isOpen]);
@@ -73,27 +84,48 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
     setStep('processing');
 
     try {
-      const res = await fetch('/api/paystack/initialize', {
+      const payload = {
+        email: formData.email.trim(),
+        name: formData.fullName.trim(),
+        phone: formData.phone.trim(),
+        callbackUrl: `${window.location.origin}/?paid=true`,
+      };
+
+      // Call primary endpoint: /api/payments/initialize
+      let response = await safeFetchJson<{
+        success: boolean;
+        reference: string;
+        authorization_url?: string;
+        access_code?: string;
+        data?: { authorization_url?: string; reference?: string };
+        error?: string;
+      }>('/api/payments/initialize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: formData.email.trim(),
-          name: formData.fullName.trim(),
-          phone: formData.phone.trim(),
-          callbackUrl: `${window.location.origin}/?paid=true`,
-        }),
+        body: JSON.stringify(payload),
       });
 
-      const initData = await res.json();
-
-      if (!res.ok || !initData.success) {
-        throw new Error(initData.error || 'Could not initialize payment transaction.');
+      // If 404 on /api/payments/initialize, try alias /api/paystack/initialize
+      if (!response.ok && response.status === 404) {
+        response = await safeFetchJson('/api/paystack/initialize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
       }
 
-      const reference = initData.reference;
+      if (!response.ok || !response.data?.success) {
+        const errorDetail = response.error || response.data?.error || 'Could not initialize Paystack transaction.';
+        throw new Error(errorDetail);
+      }
+
+      const initData = response.data;
+      const reference = initData.reference || initData.data?.reference || '';
       setActiveReference(reference);
 
-      // Check if real Paystack public inline is available
+      const authUrl = initData.authorization_url || initData.data?.authorization_url;
+
+      // 1. If Paystack Inline Popup is available and configured
       if (paystackConfig.publicKey && window.PaystackPop) {
         const handler = window.PaystackPop.setup({
           key: paystackConfig.publicKey,
@@ -107,32 +139,31 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
               { display_name: 'Phone', variable_name: 'phone', value: formData.phone.trim() },
             ],
           },
-          callback: function (response: any) {
-            verifyPayment(response.reference || reference);
+          callback: function (paystackCallbackResponse: any) {
+            verifyPayment(paystackCallbackResponse.reference || reference);
           },
           onClose: function () {
             setStep('form');
-            setErrorMessage('Payment window was closed before completion.');
+            setErrorMessage('Payment window was closed before completing checkout.');
           },
         });
         handler.openIframe();
         return;
       }
 
-      // If server returned an authorization URL (standard hosted redirect checkout)
-      if (initData.data?.authorization_url) {
-        window.location.href = initData.data.authorization_url;
+      // 2. Redirect to real Paystack authorization URL
+      if (authUrl) {
+        window.location.href = authUrl;
         return;
       }
 
-      // If server is in sandbox/testing mode
-      if (initData.sandbox) {
-        setStep('sandbox_confirm');
+      // 3. Fallback: verify directly
+      if (reference) {
+        verifyPayment(reference);
         return;
       }
 
-      // Otherwise verify directly with reference
-      verifyPayment(reference);
+      throw new Error('No authorization URL or reference returned by payment gateway.');
     } catch (err: any) {
       setStep('failed');
       setErrorMessage(err.message || 'An error occurred during payment initialization.');
@@ -144,21 +175,31 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
     setErrorMessage('');
 
     try {
-      const verifyRes = await fetch(
-        `/api/paystack/verify/${encodeURIComponent(ref)}?email=${encodeURIComponent(formData.email)}&name=${encodeURIComponent(formData.fullName)}`
+      let verifyRes = await safeFetchJson<VerificationResult>(
+        `/api/payments/verify/${encodeURIComponent(ref)}`
       );
-      const verifyData = await verifyRes.json();
 
-      if (verifyRes.ok && verifyData.verified) {
-        onSuccess(verifyData);
+      // Fallback to query param or alias if 404
+      if (!verifyRes.ok && verifyRes.status === 404) {
+        verifyRes = await safeFetchJson<VerificationResult>(
+          `/api/paystack/verify/${encodeURIComponent(ref)}`
+        );
+      }
+
+      if (verifyRes.ok && verifyRes.data?.verified) {
+        onSuccess(verifyRes.data);
         onClose();
       } else {
         setStep('failed');
-        setErrorMessage(verifyData.error || 'Payment verification failed. Paystack reported incomplete status.');
+        setErrorMessage(
+          verifyRes.error ||
+          verifyRes.data?.error ||
+          'Payment verification failed. Paystack reported incomplete status.'
+        );
       }
     } catch (err: any) {
       setStep('failed');
-      setErrorMessage('Network error during verification. You can check reference or contact WhatsApp support.');
+      setErrorMessage('Network error during verification. You can check your reference below or contact WhatsApp support.');
     }
   };
 
@@ -217,7 +258,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
               {errorMessage && (
                 <div className="p-3.5 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-300 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{errorMessage}</span>
+                  <div className="space-y-1">
+                    <p className="font-semibold">Unable to proceed</p>
+                    <p>{errorMessage}</p>
+                  </div>
                 </div>
               )}
 
@@ -249,7 +293,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                   className="w-full px-4 py-3 bg-[#121A2B] border border-white/[0.1] rounded-xl text-sm text-white placeholder-[#A1AEC2]/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#3978FF]"
                 />
-                <p className="text-[11px] text-[#A1AEC2]">Your transaction receipt will be sent here.</p>
+                <p className="text-[11px] text-[#A1AEC2]">Your transaction receipt and access confirmation will be sent here.</p>
               </div>
 
               {/* Input: Phone Number */}
@@ -281,58 +325,20 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
               {/* Security info */}
               <div className="flex items-center justify-center gap-4 text-[11px] text-[#A1AEC2]">
                 <span className="flex items-center gap-1">
-                  <ShieldCheck className="w-3.5 h-3.5 text-[#20D69A]" /> 256-bit encryption
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#20D69A]" /> 256-bit SSL encryption
                 </span>
                 <span aria-hidden="true" className="text-white/20">·</span>
-                <span>Paystack PCI-DSS certified</span>
+                <span>PCI-DSS Level 1 certified</span>
               </div>
             </form>
-          )}
-
-          {/* Sandbox Confirmation Mode (When testing before inserting secret key) */}
-          {step === 'sandbox_confirm' && (
-            <div className="text-center space-y-6">
-              <div className="w-14 h-14 rounded-full bg-[#5B9BFF]/15 border border-[#5B9BFF]/40 mx-auto flex items-center justify-center text-[#5B9BFF]">
-                <ShieldCheck className="w-8 h-8" />
-              </div>
-              <div className="space-y-2">
-                <h4 className="text-lg font-bold text-white">
-                  Paystack Sandbox Ready
-                </h4>
-                <p className="text-xs sm:text-sm text-[#A1AEC2] leading-relaxed">
-                  Transaction reference <span className="font-mono text-white select-all">{activeReference}</span> was generated for {formData.fullName}.
-                </p>
-                <p className="text-xs text-[#20D69A] bg-[#20D69A]/10 border border-[#20D69A]/20 p-2.5 rounded-xl">
-                  To accept live card/bank payments in production, add your <strong>PAYSTACK_SECRET_KEY</strong> in environment settings.
-                </p>
-              </div>
-
-              <div className="space-y-3">
-                <button
-                  type="button"
-                  onClick={() => verifyPayment(activeReference)}
-                  className="w-full py-3.5 px-6 bg-[#20D69A] hover:bg-[#1CBE89] text-slate-950 font-bold text-sm rounded-xl transition-all shadow-md flex items-center justify-center gap-2"
-                >
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>Simulate Successful ₦7,000 Verification</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStep('form')}
-                  className="text-xs text-[#A1AEC2] hover:text-white"
-                >
-                  Back to edit details
-                </button>
-              </div>
-            </div>
           )}
 
           {/* Processing / Initializing State */}
           {step === 'processing' && (
             <div className="py-12 text-center space-y-4">
               <RefreshCw className="w-10 h-10 text-[#3978FF] animate-spin mx-auto" />
-              <h4 className="text-base font-bold text-white">Initializing Paystack Gateway...</h4>
-              <p className="text-xs text-[#A1AEC2]">Setting up secure transaction for ₦7,000 NGN.</p>
+              <h4 className="text-base font-bold text-white">Connecting to Paystack Gateway...</h4>
+              <p className="text-xs text-[#A1AEC2]">Preparing your secure ₦7,000 checkout session.</p>
             </div>
           )}
 
@@ -340,8 +346,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
           {step === 'verifying' && (
             <div className="py-12 text-center space-y-4">
               <RefreshCw className="w-10 h-10 text-[#20D69A] animate-spin mx-auto" />
-              <h4 className="text-base font-bold text-white">Verifying Transaction With Server...</h4>
-              <p className="text-xs text-[#A1AEC2]">Confirming payment status and generating your access token.</p>
+              <h4 className="text-base font-bold text-white">Verifying Transaction With Paystack...</h4>
+              <p className="text-xs text-[#A1AEC2]">Confirming payment confirmation and unlocking your community access.</p>
             </div>
           )}
 
@@ -353,10 +359,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
               </div>
 
               <div className="space-y-2">
-                <h4 className="text-lg font-bold text-white">Payment Not Completed</h4>
-                <p className="text-xs sm:text-sm text-rose-300 bg-rose-500/10 p-3 rounded-xl border border-rose-500/20">
-                  {errorMessage || 'Unable to verify payment with Paystack.'}
-                </p>
+                <h4 className="text-lg font-bold text-white">Checkout Notice</h4>
+                <div className="text-xs sm:text-sm text-rose-300 bg-rose-500/10 p-3.5 rounded-xl border border-rose-500/20 text-left">
+                  <p className="font-semibold text-rose-200 mb-1">Issue encountered:</p>
+                  <p>{errorMessage || 'Unable to complete Paystack session.'}</p>
+                </div>
                 {activeReference && (
                   <p className="text-xs text-[#A1AEC2]">
                     Reference: <span className="font-mono text-white select-all">{activeReference}</span>
@@ -370,7 +377,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
                   Paid But Couldn't Access Your Course?
                 </p>
                 <p className="text-[#A1AEC2]">
-                  If your money was debited, don't worry! Chat with our WhatsApp support lines with your transaction reference:
+                  If your account was debited, chat with our WhatsApp support lines with your transaction reference or receipt:
                 </p>
                 <div className="space-y-2 pt-1">
                   <a

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { MessageCircle, Search, AlertCircle, ShieldAlert, CheckCircle2, ArrowRight, Copy, Check } from 'lucide-react';
+import { MessageCircle, Search, AlertCircle, Copy, Check } from 'lucide-react';
 import { VerificationResult } from '../types';
+import { safeFetchJson } from '../lib/apiClient';
 
 interface PaymentSupportSectionProps {
   onVerifiedSuccess: (result: VerificationResult) => void;
@@ -28,13 +29,20 @@ export const PaymentSupportSection: React.FC<PaymentSupportSectionProps> = ({ on
     setLookupError('');
 
     try {
-      const res = await fetch(`/api/paystack/verify/${encodeURIComponent(lookupRef.trim())}`);
-      const data = await res.json();
+      let res = await safeFetchJson<VerificationResult>(
+        `/api/payments/verify/${encodeURIComponent(lookupRef.trim())}`
+      );
 
-      if (res.ok && data.verified) {
-        onVerifiedSuccess(data);
+      if (!res.ok && res.status === 404) {
+        res = await safeFetchJson<VerificationResult>(
+          `/api/paystack/verify/${encodeURIComponent(lookupRef.trim())}`
+        );
+      }
+
+      if (res.ok && res.data?.verified) {
+        onVerifiedSuccess(res.data);
       } else {
-        setLookupError(data.error || 'Transaction reference not found or unverified. Please message support below.');
+        setLookupError(res.error || res.data?.error || 'Transaction reference not found or unverified. Please message support below.');
       }
     } catch (err: any) {
       setLookupError('Could not verify reference. Please check your internet or reach out directly on WhatsApp.');

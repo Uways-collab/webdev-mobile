@@ -18,6 +18,7 @@ import { Footer } from './components/Footer';
 import { CheckoutModal } from './components/CheckoutModal';
 import { SuccessView } from './components/SuccessView';
 import { VerificationResult } from './types';
+import { safeFetchJson } from './lib/apiClient';
 
 export default function App() {
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
@@ -33,18 +34,28 @@ export default function App() {
       // Clean query string from browser address bar
       window.history.replaceState({}, document.title, window.location.pathname);
 
-      // Verify on server
-      fetch(`/api/paystack/verify/${encodeURIComponent(reference)}`)
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.verified) {
-            setVerifiedResult(data);
-          } else {
-            setVerificationError(data.error || 'Payment was not verified by Paystack.');
+      // Verify on server safely
+      safeFetchJson<VerificationResult>(`/api/payments/verify/${encodeURIComponent(reference)}`)
+        .then(async (res) => {
+          if (res.ok && res.data?.verified) {
+            setVerifiedResult(res.data);
+            return;
           }
+
+          // Try alias if 404
+          if (!res.ok && res.status === 404) {
+            const fb = await safeFetchJson<VerificationResult>(`/api/paystack/verify/${encodeURIComponent(reference)}`);
+            if (fb.ok && fb.data?.verified) {
+              setVerifiedResult(fb.data);
+              return;
+            }
+          }
+
+          const err = res.error || res.data?.error || 'Payment was not verified by Paystack.';
+          setVerificationError(err);
         })
         .catch(() => {
-          setVerificationError('Error connecting to verification server. Please message support below.');
+          setVerificationError('Error connecting to verification server. Please message WhatsApp support below.');
         });
     }
   }, []);
