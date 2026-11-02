@@ -35,7 +35,7 @@ export default function App() {
       window.history.replaceState({}, document.title, window.location.pathname);
 
       // Verify on server safely
-      safeFetchJson<VerificationResult>(`/api/payments/verify/${encodeURIComponent(reference)}`)
+      safeFetchJson<VerificationResult>(`/api/payments/verify?reference=${encodeURIComponent(reference)}`)
         .then(async (res) => {
           if (res.ok && res.data?.verified) {
             setVerifiedResult(res.data);
@@ -44,7 +44,7 @@ export default function App() {
 
           // Try alias if 404
           if (!res.ok && res.status === 404) {
-            const fb = await safeFetchJson<VerificationResult>(`/api/paystack/verify/${encodeURIComponent(reference)}`);
+            const fb = await safeFetchJson<VerificationResult>(`/api/paystack/verify?reference=${encodeURIComponent(reference)}`);
             if (fb.ok && fb.data?.verified) {
               setVerifiedResult(fb.data);
               return;

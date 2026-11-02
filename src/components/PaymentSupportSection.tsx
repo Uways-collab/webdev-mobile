@@ -30,12 +30,12 @@ export const PaymentSupportSection: React.FC<PaymentSupportSectionProps> = ({ on
 
     try {
       let res = await safeFetchJson<VerificationResult>(
-        `/api/payments/verify/${encodeURIComponent(lookupRef.trim())}`
+        `/api/payments/verify?reference=${encodeURIComponent(lookupRef.trim())}`
       );
 
       if (!res.ok && res.status === 404) {
         res = await safeFetchJson<VerificationResult>(
-          `/api/paystack/verify/${encodeURIComponent(lookupRef.trim())}`
+          `/api/paystack/verify?reference=${encodeURIComponent(lookupRef.trim())}`
         );
       }
 

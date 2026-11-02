@@ -176,7 +176,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ isOpen, onClose, o
 
     try {
       let verifyRes = await safeFetchJson<VerificationResult>(
-        `/api/payments/verify/${encodeURIComponent(ref)}`
+        `/api/payments/verify?reference=${encodeURIComponent(ref)}`
       );
 
       // Fallback to query param or alias if 404

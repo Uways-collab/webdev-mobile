@@ -7,15 +7,27 @@
     },
     {
       "source": "/api/payments/status/:reference",
-      "destination": "/api/payments/status?reference=:reference"
+      "destination": "/api/payments/verify?reference=:reference"
+    },
+    {
+      "source": "/api/payments/status",
+      "destination": "/api/payments/verify"
     },
     {
       "source": "/api/paystack/verify/:reference",
       "destination": "/api/payments/verify?reference=:reference"
     },
     {
+      "source": "/api/paystack/verify",
+      "destination": "/api/payments/verify"
+    },
+    {
       "source": "/api/paystack/status/:reference",
-      "destination": "/api/payments/status?reference=:reference"
+      "destination": "/api/payments/verify?reference=:reference"
+    },
+    {
+      "source": "/api/paystack/status",
+      "destination": "/api/payments/verify"
     },
     {
       "source": "/api/paystack/initialize",
